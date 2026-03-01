@@ -578,7 +578,7 @@ export function Dashboard({
                       <div className="flex items-center gap-1.5">
                         {row.hash}
                         <a
-                          href={`https://testnet.opnet.org/tx/${row.hash}`}
+                          href={`https://opscan.org/transactions/${row.hash}?network=op_testnet`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-btc-muted hover:text-btc-orange transition-colors"

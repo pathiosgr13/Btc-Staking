@@ -53,7 +53,7 @@ function TxResult({ state, type, onReset }: { state: TxState; type: 'stake' | 'u
               <div className="flex items-center gap-2">
                 <span className="text-xs text-btc-muted font-mono truncate">{state.txId.slice(0, 32)}…</span>
                 <a
-                  href={`https://testnet.opnet.org/tx/${state.txId}`}
+                  href={`https://opscan.org/transactions/${state.txId}?network=op_testnet`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-btc-orange hover:text-btc-gold"
