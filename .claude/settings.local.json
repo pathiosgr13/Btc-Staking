@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(npm install:*)",
+      "Bash(npm search:*)",
+      "Bash(npm view:*)",
+      "Bash(npm pack:*)",
+      "Bash(npm run:*)",
+      "Bash(mkdir:*)",
+      "Bash(/c/btc-staking/contract/node_modules/.bin/asc:*)",
+      "Bash(xargs grep:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(grep:*)",
+      "Bash(printf:*)",
+      "Bash(npm show:*)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

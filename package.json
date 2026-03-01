@@ -1,0 +1,13 @@
+{
+  "name": "btc-staking",
+  "version": "1.0.0",
+  "description": "tBTC Staking App on OP_NET Testnet",
+  "private": true,
+  "scripts": {
+    "dev":            "npm run dev --prefix frontend",
+    "build":          "npm run build --prefix frontend",
+    "build:contract": "npm run build --prefix contract",
+    "deploy":         "cd contract && OPNET_PRIVATE_KEY=$OPNET_PRIVATE_KEY node scripts/deploy.js",
+    "install:all":    "npm install --prefix contract && npm install --prefix frontend"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "btc-staking-contract",
+  "version": "1.0.0",
+  "description": "OP_NET tBTC Staking Smart Contract",
+  "scripts": {
+    "build": "asc src/index.ts --target release --outFile dist/contract.wasm --textFile dist/contract.wat --sourceMap --optimize",
+    "build:debug": "asc src/index.ts --target debug --outFile dist/contract-debug.wasm",
+    "deploy": "node scripts/deploy.js",
+    "test": "node scripts/test.js"
+  },
+  "dependencies": {
+    "@btc-vision/btc-runtime": "^1.10.12"
+  },
+  "devDependencies": {
+    "@btc-vision/opnet-transform": "^0.2.1",
+    "@noble/hashes": "^1.8.0",
+    "assemblyscript": "^0.27.29",
+    "typescript": "^5.4.5"
+  }
+}
