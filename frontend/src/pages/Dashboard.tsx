@@ -12,6 +12,7 @@ import { WalletStatus } from '../hooks/useWallet';
 import { TxState } from '../hooks/useStaking';
 import { UserPosition } from '../lib/opnet';
 import { AppPage } from '../components/Header';
+import { Share2, Gift as GiftBonus } from 'lucide-react';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const CURRENT_BLOCK = 841_024n;  // estimated BTC testnet block, March 1 2026
@@ -113,22 +114,25 @@ function CopyButton({ text }: { text: string }) {
 
 // ── Props ──────────────────────────────────────────────────────────────────────
 interface DashboardProps {
-  status:         WalletStatus;
-  address:        string | null;
-  balance:        bigint;
-  network:        string | null;
-  btcPrice:       number;
-  position:       UserPosition | null;
-  apyBps:         number;
-  stakeState:     TxState;
-  unstakeState:   TxState;
-  claimState:     TxState;
-  onStake:        (amount: string) => void;
-  onUnstake:      (amount: string) => void;
-  onClaimRewards: () => void;
-  onResetTx:      (type: 'stake' | 'unstake' | 'claim') => void;
-  onConnect:      () => void;
-  onNavigate:     (p: AppPage) => void;
+  status:           WalletStatus;
+  address:          string | null;
+  balance:          bigint;
+  network:          string | null;
+  btcPrice:         number;
+  position:         UserPosition | null;
+  apyBps:           number;
+  stakeState:       TxState;
+  unstakeState:     TxState;
+  claimState:       TxState;
+  onStake:          (amount: string) => void;
+  onUnstake:        (amount: string) => void;
+  onClaimRewards:   () => void;
+  onResetTx:        (type: 'stake' | 'unstake' | 'claim') => void;
+  onConnect:        () => void;
+  onNavigate:       (p: AppPage) => void;
+  referralBonusBTC?: number;
+  referralCount?:   number;
+  referralActive?:  boolean;   // true if this user was referred (gets +5% APY)
 }
 
 // ── Page ───────────────────────────────────────────────────────────────────────
@@ -138,6 +142,9 @@ export function Dashboard({
   stakeState, unstakeState, claimState,
   onStake: _onStake, onUnstake, onClaimRewards, onResetTx,
   onConnect, onNavigate,
+  referralBonusBTC = 0,
+  referralCount    = 0,
+  referralActive   = false,
 }: DashboardProps) {
   const [unstakeAmt,  setUnstakeAmt]  = useState('');
   const [showUnstake, setShowUnstake] = useState(false);
@@ -320,6 +327,67 @@ export function Dashboard({
           </NeonCard>
         </motion.div>
       </div>
+
+      {/* ── Referral bonus banner ────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {(referralBonusBTC > 0 || referralActive || referralCount > 0) && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ delay: 0.18, duration: 0.4 }}
+          >
+            <div
+              className="rounded-2xl border border-[#cc44ff]/30 bg-[#cc44ff]/5 overflow-hidden"
+              style={{ boxShadow: '0 0 24px rgba(204,68,255,0.08), inset 0 1px 0 rgba(204,68,255,0.12)' }}
+            >
+              <div className="h-px bg-gradient-to-r from-transparent via-[#cc44ff]/50 to-transparent" />
+              <div className="p-4 flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2 shrink-0">
+                  <div
+                    className="w-8 h-8 rounded-lg flex items-center justify-center"
+                    style={{ background: 'rgba(204,68,255,0.15)', border: '1px solid rgba(204,68,255,0.3)' }}
+                  >
+                    <Share2 className="w-4 h-4 text-[#cc44ff]" />
+                  </div>
+                  <span className="text-white font-semibold text-sm">Referral Bonus</span>
+                </div>
+
+                <div className="flex flex-wrap gap-6 flex-1">
+                  {referralCount > 0 && (
+                    <div>
+                      <p className="text-[10px] text-btc-muted uppercase tracking-wider">Referrals</p>
+                      <p className="text-white font-bold text-sm font-mono">{referralCount}</p>
+                    </div>
+                  )}
+                  {referralBonusBTC > 0 && (
+                    <div>
+                      <p className="text-[10px] text-btc-muted uppercase tracking-wider">Bonus Earned</p>
+                      <p className="text-[#cc44ff] font-bold text-sm font-mono">
+                        +{referralBonusBTC.toFixed(6)} tBTC
+                      </p>
+                    </div>
+                  )}
+                  {referralActive && (
+                    <div className="flex items-center gap-1.5 self-center">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#cc44ff] animate-pulse inline-block" />
+                      <span className="text-[#cc44ff] text-xs font-semibold">+5% APY boost active</span>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => onNavigate('referral')}
+                  className="shrink-0 flex items-center gap-1.5 text-xs font-semibold text-[#cc44ff] hover:text-white transition-colors px-3 py-1.5 rounded-lg border border-[#cc44ff]/30 hover:bg-[#cc44ff]/10"
+                >
+                  <GiftBonus className="w-3.5 h-3.5" />
+                  View Referrals
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Row 2: Pending rewards + Countdown | Quick Actions ───────────────── */}
       <div className="grid lg:grid-cols-5 gap-4">

@@ -3,11 +3,12 @@ import { Zap } from 'lucide-react';
 import { WalletButton } from './WalletButton';
 import { WalletStatus } from '../hooks/useWallet';
 
-export type AppPage = 'stake' | 'analytics' | 'docs' | 'dashboard';
+export type AppPage = 'stake' | 'analytics' | 'docs' | 'dashboard' | 'referral';
 
 const NAV_ITEMS: { label: string; page: AppPage }[] = [
   { label: 'Stake',     page: 'stake'     },
   { label: 'Dashboard', page: 'dashboard' },
+  { label: 'Referral',  page: 'referral'  },
   { label: 'Analytics', page: 'analytics' },
   { label: 'Docs',      page: 'docs'      },
 ];

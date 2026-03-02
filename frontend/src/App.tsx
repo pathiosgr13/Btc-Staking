@@ -17,14 +17,17 @@ import { RewardCalculator }   from './components/RewardCalculator';
 import { Analytics }          from './pages/Analytics';
 import { Docs }               from './pages/Docs';
 import { Dashboard }          from './pages/Dashboard';
+import { Referral }           from './pages/Referral';
 import { useWallet }          from './hooks/useWallet';
 import { useStaking }         from './hooks/useStaking';
+import { useReferral }        from './hooks/useReferral';
 
 export default function App() {
   const [page, setPage] = useState<AppPage>('stake');
 
-  const wallet  = useWallet();
-  const staking = useStaking(wallet.address, wallet.provider);
+  const wallet   = useWallet();
+  const staking  = useStaking(wallet.address, wallet.provider);
+  const referral = useReferral(wallet.address);
 
   const apy      = staking.apyBps / 100;
   const tvlUSD   = staking.tvl.times(staking.btcPrice);
@@ -281,6 +284,33 @@ export default function App() {
                 onResetTx={staking.resetTx}
                 onConnect={wallet.connect}
                 onNavigate={setPage}
+                referralBonusBTC={referral.stats?.bonusEarnedBTC ?? 0}
+                referralCount={referral.stats?.totalReferrals ?? 0}
+                referralActive={!!referral.referrer}
+              />
+            </motion.div>
+          )}
+
+          {/* ── Referral page ────────────────────────────────────────────────────── */}
+          {page === 'referral' && (
+            <motion.div
+              key="referral"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.25 }}
+            >
+              <Referral
+                status={wallet.status}
+                address={wallet.address}
+                referralLink={referral.referralLink}
+                referrer={referral.referrer}
+                stats={referral.stats}
+                leaderboard={referral.leaderboard}
+                userRank={referral.userRank}
+                bonusMultiplier={referral.bonusMultiplier}
+                btcPrice={staking.btcPrice}
+                onConnect={wallet.connect}
               />
             </motion.div>
           )}
