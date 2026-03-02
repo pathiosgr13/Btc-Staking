@@ -181,30 +181,97 @@ export async function fetchBalance(address: string, walletProvider?: any): Promi
 
 // ─── Read helpers ─────────────────────────────────────────────────────────────
 
+/**
+ * Read a single uint256 from a CallResult.
+ *
+ * The SDK populates `res.properties` via its ABI decoder (named fields).
+ * If that is empty (e.g. SDK edge case, partial decode), fall back to reading
+ * the raw BinaryReader — `res.result` starts at offset 0 after the call.
+ *
+ * NOTE: `res.decoded` does NOT exist on CallResult — the correct fields are
+ * `res.properties` (named object) and `res.result` (raw BinaryReader).
+ */
+function readU256Result(res: any, propName: string, fallback: bigint): bigint {
+  if (res?.revert) throw new Error(res.revert);
+  const fromProp = res?.properties?.[propName];
+  if (fromProp !== undefined && fromProp !== null) return BigInt(fromProp.toString());
+  // BinaryReader fallback — reset cursor then read the first uint256
+  const reader = res?.result;
+  if (reader?.setOffset && reader?.readU256) {
+    try { reader.setOffset(0); return reader.readU256(); } catch { /* ignore */ }
+  }
+  return fallback;
+}
+
 export async function fetchTVL(): Promise<BigNumber> {
   const c   = await getStakingContract();
   const res = await (c as any).getTVL();
-  const val = res?.properties?.tvl ?? res?.decoded?.[0] ?? 0n;
-  return satsToBTC(val.toString());
+  return satsToBTC(readU256Result(res, 'tvl', 0n).toString());
 }
 
 export async function fetchAPY(): Promise<number> {
   const c   = await getStakingContract();
   const res = await (c as any).getAPY();
-  const val = res?.properties?.apy ?? res?.decoded?.[0] ?? 1200n;
-  return Number(val.toString());
+  return Number(readU256Result(res, 'apy', 1200n).toString());
 }
 
+/**
+ * Fetch the on-chain staked amount, pending rewards and stake block for a user.
+ *
+ * Three-layer decode strategy so we handle every SDK response variant:
+ *
+ *  1. Primary  — res.properties (ABI-named fields, set by SDK's setDecoded())
+ *  2. Fallback — res.result BinaryReader, read 3 × uint256 sequentially
+ *  3. Guard    — catch all errors and return zero position (never throw)
+ *
+ * Returning zeros on error means the UI can still render TVL/APY even when
+ * the position call fails, and the position display stays neutral (not broken).
+ */
 export async function fetchUserPosition(address: string): Promise<UserPosition> {
-  const c   = await getStakingContract();
-  const res = await (c as any).getUserPosition(address);
-  const p   = res?.properties ?? {};
-  const d   = res?.decoded   ?? [0n, 0n, 0n];
-  return {
-    stakedAmount:  satsToBTC((p.stakedAmount  ?? d[0] ?? 0n).toString()),
-    pendingReward: satsToBTC((p.pendingReward ?? d[1] ?? 0n).toString()),
-    stakeBlock:    BigInt((p.stakeBlock ?? d[2] ?? 0n).toString()),
-  };
+  try {
+    const c   = await getStakingContract();
+    const res = await (c as any).getUserPosition(address);
+
+    // A set revert string means the contract rejected the call
+    if (res?.revert) {
+      console.warn('[BTCStake] getUserPosition reverted:', res.revert);
+      return zeroPosition();
+    }
+
+    // Primary: SDK has decoded the 3 ABI outputs into named properties
+    const p = res?.properties;
+    if (p?.stakedAmount !== undefined && p?.stakedAmount !== null) {
+      return {
+        stakedAmount:  satsToBTC(p.stakedAmount.toString()),
+        pendingReward: satsToBTC((p.pendingReward ?? 0n).toString()),
+        stakeBlock:    BigInt((p.stakeBlock ?? 0n).toString()),
+      };
+    }
+
+    // Fallback: read directly from the raw BinaryReader (3 × 32-byte uint256)
+    // The contract writes them in order: stakedAmount, pendingReward, stakeBlock
+    const reader = res?.result;
+    if (reader?.setOffset && reader?.readU256) {
+      reader.setOffset(0); // reset cursor in case partial decode advanced it
+      const stakedSats  = reader.readU256();
+      const pendingSats = reader.readU256();
+      const blk         = reader.readU256();
+      return {
+        stakedAmount:  satsToBTC(stakedSats.toString()),
+        pendingReward: satsToBTC(pendingSats.toString()),
+        stakeBlock:    blk,
+      };
+    }
+
+    return zeroPosition();
+  } catch (err: any) {
+    console.warn('[BTCStake] fetchUserPosition error:', err?.message ?? err);
+    return zeroPosition();
+  }
+}
+
+function zeroPosition(): UserPosition {
+  return { stakedAmount: new BigNumber(0), pendingReward: new BigNumber(0), stakeBlock: 0n };
 }
 
 export async function fetchBtcPrice(): Promise<number> {

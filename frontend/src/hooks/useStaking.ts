@@ -81,12 +81,18 @@ export function useStaking(address: string | null, walletProvider: any) {
     }
 
     try {
+      // Fetch TVL, APY, and BTC price together — if these fail the page is
+      // genuinely broken (no network / wrong RPC).
       const [tvl, apyBps, btcPrice] = await Promise.all([
         fetchTVL(),
         fetchAPY(),
         fetchBtcPrice(),
       ]);
 
+      // Position fetch is isolated: fetchUserPosition catches all errors
+      // internally and returns zeroPosition(), so this never throws.
+      // TVL / APY are therefore always displayed even if the user's position
+      // call fails (e.g. revert, wrong address encoding, RPC hiccup).
       const position = address
         ? await fetchUserPosition(address)
         : EMPTY_POSITION;
