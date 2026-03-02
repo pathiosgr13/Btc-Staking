@@ -133,19 +133,48 @@ async function getStakingContract(provider?: AnyProvider) {
   return getContract(CONTRACT_ADDR, abi, p, net, undefined);
 }
 
-// ─── Balance fetch via OP_NET RPC ─────────────────────────────────────────────
+// ─── Balance fetch ────────────────────────────────────────────────────────────
 
 /**
- * Fetch the confirmed tBTC balance for an address from the OP_NET testnet node.
- * Returns satoshis as bigint (e.g. 5000000n = 0.05 tBTC).
+ * Fetch the confirmed tBTC balance for an address.
+ *
+ * Strategy 1 — wallet provider's own getBalance():
+ *   Both OP_WALLET (window.opnet) and UniSat (window.unisat) extend the same
+ *   Unisat interface and return { confirmed, unconfirmed, total } in satoshis.
+ *   This is the exact same source the wallet UI displays, so it always matches.
+ *
+ * Strategy 2 — OP_NET RPC fallback:
+ *   JSONRpcProvider.getBalance(address, filterOrdinals=true) — the `true` flag
+ *   excludes ordinal/inscription UTXOs from the total, returning only spendable
+ *   sats.  The previous value of `false` inflated the balance by including locked
+ *   ordinal sats that the wallet correctly excluded from its display.
+ *   The singleton is reset on failure so the next call gets a fresh connection.
  */
-export async function fetchBalance(address: string): Promise<bigint> {
+export async function fetchBalance(address: string, walletProvider?: any): Promise<bigint> {
+  // Strategy 1: ask the wallet extension directly — matches wallet UI exactly
+  if (walletProvider?.getBalance) {
+    try {
+      const raw = await walletProvider.getBalance();
+      // OP_WALLET and UniSat both return { confirmed, unconfirmed, total } in sats
+      if (raw != null && typeof raw === 'object' && 'confirmed' in raw) {
+        return BigInt(Math.round(Number(raw.confirmed)));
+      }
+      // Older / alternative formats: plain number, bigint, or numeric string
+      if (typeof raw === 'number' || typeof raw === 'bigint' || typeof raw === 'string') {
+        return BigInt(Math.round(Number(raw)));
+      }
+    } catch {
+      // Fall through to RPC
+    }
+  }
+
+  // Strategy 2: OP_NET RPC — filterOrdinals=true to count only spendable UTXOs
   try {
     const provider = await getReadProvider();
-    // JSONRpcProvider.getBalance(address, filterOrdinals?) → Promise<bigint>
-    const sats = await (provider as any).getBalance(address, false);
+    const sats = await (provider as any).getBalance(address, true);
     return BigInt(sats?.toString() ?? '0');
   } catch {
+    _provider = null; // reset singleton so next call reconnects cleanly
     return 0n;
   }
 }

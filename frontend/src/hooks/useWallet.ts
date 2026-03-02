@@ -1,10 +1,12 @@
 /**
- * useWallet — OP_WALLET connection hook
+ * useWallet — OP_WALLET / UniSat connection hook
  *
- * Balance is read from the OP_NET JSON-RPC node (JSONRpcProvider.getBalance),
- * NOT from the wallet extension, because:
- *  - OP_WALLET's getBalance() is unreliable / absent on many versions
- *  - The RPC node has the authoritative confirmed UTXO set
+ * Balance strategy (see fetchBalance in opnet.ts):
+ *  1. Wallet extension's own getBalance() — exact match with wallet UI
+ *  2. OP_NET RPC fallback with filterOrdinals=true — spendable sats only
+ *
+ * The wallet provider is kept in a ref so the 30-second poll timer always
+ * reads the current provider without needing to re-create the interval.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -47,15 +49,18 @@ function detectProvider(): any | null {
 
 export function useWallet() {
   const [state, setState] = useState<WalletState>(INITIAL);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Keep a ref so the poll timer always sees the latest address
-  const addressRef = useRef<string | null>(null);
+  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Refs let the poll timer always see the latest address and provider without
+  // needing to teardown/recreate the interval on every state change.
+  const addressRef  = useRef<string | null>(null);
+  const providerRef = useRef<any>(null);
 
   // ── Balance polling ────────────────────────────────────────────────────────
   const updateBalance = useCallback(async (address: string) => {
-    const sats = await fetchBalance(address);
+    // Pass the live wallet provider so fetchBalance can use the wallet's own
+    // getBalance() API first (matches the wallet UI exactly).
+    const sats = await fetchBalance(address, providerRef.current);
     setState(prev => {
-      // Only update if the address hasn't changed and balance actually differs
       if (prev.address !== address) return prev;
       if (prev.balance === sats) return prev;
       return { ...prev, balance: sats };
@@ -88,6 +93,7 @@ export function useWallet() {
         disconnect();
       } else {
         const address = accounts[0];
+        providerRef.current = detectProvider(); // refresh in case provider changed
         setState(prev => ({ ...prev, address, balance: 0n }));
         updateBalance(address);
         startPolling(address);
@@ -135,8 +141,12 @@ export function useWallet() {
 
       const address = accounts[0];
 
-      // Fetch balance from OP_NET RPC first, then set all state at once
-      const balance = await fetchBalance(address);
+      // Set the provider ref before fetching balance so Strategy 1 (wallet API)
+      // is available for both the initial fetch and subsequent poll ticks.
+      providerRef.current = provider;
+
+      // Fetch balance via wallet's own API first, then RPC fallback.
+      const balance = await fetchBalance(address, provider);
 
       setState({
         status: 'connected',
@@ -145,7 +155,7 @@ export function useWallet() {
         network,
         provider,
         error:   null,
-        balance,           // ← correct value, not overwritten by 0n
+        balance,
       });
 
       startPolling(address);
@@ -162,6 +172,7 @@ export function useWallet() {
 
   // ── Disconnect ────────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
+    providerRef.current = null;
     stopPolling();
     setState(INITIAL);
     localStorage.removeItem('opnet_connected');
