@@ -18,7 +18,9 @@
       "Bash(grep:*)",
       "Bash(printf:*)",
       "Bash(npm show:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(ls:*)",
+      "Bash(python3:*)"
     ]
   }
 }

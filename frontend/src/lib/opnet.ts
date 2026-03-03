@@ -13,7 +13,7 @@ import {
   ABIDataTypes,
   BitcoinAbiTypes,
 } from 'opnet';
-import { networks } from '@btc-vision/bitcoin';
+import { networks, address as btcAddress } from '@btc-vision/bitcoin';
 import type { Network } from '@btc-vision/bitcoin';
 import BigNumber from 'bignumber.js';
 
@@ -246,12 +246,56 @@ export async function fetchAPY(): Promise<number> {
 }
 
 /**
+ * Convert a raw byte array to an OP_NET Address-compatible object.
+ *
+ * The OP_NET SDK checks `'equals' in value` to detect an Address object.
+ * Passing a plain string fails that check ("Cannot use 'in' operator to search
+ * for 'equals' in <string>").  We create a 32-byte Uint8Array and attach an
+ * `equals` method — exactly what the SDK needs, without importing the full
+ * Address class (which transitively imports @noble/hashes/sha2 that is not
+ * exported by @noble/hashes v2 installed in this project).
+ */
+function makeAddress(bytes: Uint8Array): any {
+  const addr = new Uint8Array(32);
+  addr.set(bytes.slice(0, 32));
+  // Attach equals so the SDK recognises this as an Address (not a plain string)
+  (addr as any).equals = (other: Uint8Array): boolean => {
+    if (addr.length !== other.length) return false;
+    for (let i = 0; i < addr.length; i++) if (addr[i] !== other[i]) return false;
+    return true;
+  };
+  return addr;
+}
+
+/**
+ * Decode a bech32/bech32m wallet address string to an OP_NET Address object.
+ *
+ * opt1pp... addresses are bech32m (version 1) with a 32-byte witness program.
+ * Those 32 bytes are the x-only tweaked pubkey stored as Blockchain.tx.sender.
+ */
+function toOpNetAddress(addrStr: string): any {
+  console.log('[BTCStake] toOpNetAddress → decoding:', addrStr);
+  try {
+    const decoded = btcAddress.fromBech32(addrStr);
+    const bytes   = new Uint8Array(decoded.data);
+    console.log('[BTCStake] toOpNetAddress → version:', decoded.version,
+      '| dataLen:', bytes.length, '| prefix:', decoded.prefix,
+      '| hex:', Buffer.from(bytes).toString('hex'));
+    return makeAddress(bytes);
+  } catch (e: any) {
+    console.warn('[BTCStake] toOpNetAddress → fromBech32 failed:', e?.message);
+    // Last resort: return the raw string so we at least see the SDK error in logs
+    return addrStr;
+  }
+}
+
+/**
  * Fetch the on-chain staked amount, pending rewards and stake block for a user.
  *
  * The contract stores positions keyed by Blockchain.tx.sender, which in OP_NET
- * is the compressed secp256k1 public key (33 bytes, hex-encoded). Passing the
- * bech32 address (20-byte witness program) produces a different storage key and
- * returns 0. We therefore try the publicKey first, then fall back to address.
+ * is the 32-byte x-only tweaked pubkey decoded from the opt1pp... wallet address.
+ * We convert the address to an OP_NET Address object so the SDK can properly
+ * encode it as ABIDataTypes.ADDRESS in the calldata.
  *
  * Three-layer decode strategy so we handle every SDK response variant:
  *  1. Primary  — res.properties (ABI-named fields, set by SDK's setDecoded())
@@ -264,11 +308,12 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   console.log('[BTCStake] fetchUserPosition → publicKey (hex):', publicKey ?? '(not provided)');
 
   // Helper: decode one getUserPosition response
-  async function tryGetPosition(key: string, label: string): Promise<UserPosition | null> {
-    console.log(`[BTCStake] getUserPosition → calling contract with ${label}:`, key);
+  async function tryGetPosition(key: any, label: string): Promise<UserPosition | null> {
+    const keyDisplay = typeof key === 'string' ? key : Buffer.from(key).toString('hex');
+    console.log(`[BTCStake] getUserPosition → calling contract with ${label}:`, keyDisplay);
     try {
       const c   = await getStakingContract();
-      const res = await (c as any).getUserPosition(key);
+      const res = await (c as any).getUserPosition(key);  // key is Address object
 
       // ── Dump the full raw response ─────────────────────────────────────
       console.log(`[BTCStake] getUserPosition (${label}) → typeof res:`, typeof res, '| null?', res == null);
@@ -344,25 +389,39 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   }
 
   try {
-    // ── Attempt 1: compressed pubkey (matches Blockchain.tx.sender in OP_NET) ──
+    // ── Attempt 1: bech32m address decoded to Address object ──────────────────
+    // opt1pp... → 32-byte x-only tweaked pubkey = what Blockchain.tx.sender stores
+    const addrObj = toOpNetAddress(address);
+    const pos1 = await tryGetPosition(addrObj, 'address→Address');
+    if (pos1 && pos1.stakedAmount.gt(0)) {
+      console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via decoded address');
+      return pos1;
+    }
+    console.log('[BTCStake] fetchUserPosition → decoded address gave 0 or null');
+
+    // ── Attempt 2: publicKey as Address (hex compressed pubkey → Address) ──────
+    // Some OP_NET versions may use the compressed pubkey bytes instead of taproot key
     if (publicKey) {
-      const pos = await tryGetPosition(publicKey, 'publicKey');
-      if (pos && pos.stakedAmount.gt(0)) {
-        console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via publicKey');
-        return pos;
+      console.log('[BTCStake] fetchUserPosition → trying publicKey fallback:', publicKey);
+      try {
+        const pubKeyBytes = new Uint8Array(Buffer.from(publicKey.replace(/^0x/, ''), 'hex'));
+        // x-only = drop the 02/03 prefix byte (bytes 1..33)
+        const xOnly = pubKeyBytes.length === 33 ? pubKeyBytes.slice(1) : pubKeyBytes;
+        const pubAddr = makeAddress(xOnly);
+        const pos2 = await tryGetPosition(pubAddr, 'publicKey→Address');
+        if (pos2 && pos2.stakedAmount.gt(0)) {
+          console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via publicKey Address');
+          return pos2;
+        }
+        console.log('[BTCStake] fetchUserPosition → publicKey Address also gave 0 or null');
+      } catch (pkErr: any) {
+        console.warn('[BTCStake] fetchUserPosition → publicKey decode failed:', pkErr?.message);
       }
-      console.log('[BTCStake] fetchUserPosition → publicKey gave 0 or null, trying address…');
     }
 
-    // ── Attempt 2: bech32 address ──────────────────────────────────────────────
-    const pos = await tryGetPosition(address, 'address');
-    if (pos) {
-      console.log('[BTCStake] fetchUserPosition → result via address:', pos.stakedAmount.toFixed(8), 'tBTC');
-      return pos;
-    }
-
-    console.warn('[BTCStake] fetchUserPosition → all attempts returned null/zero');
-    return zeroPosition();
+    // ── Attempt 3: return whatever Attempt 1 gave (zero position) ─────────────
+    console.warn('[BTCStake] fetchUserPosition → all attempts gave 0 — returning zero position');
+    return pos1 ?? zeroPosition();
   } catch (err: any) {
     console.warn('[BTCStake] fetchUserPosition → outer catch:', err?.message ?? err);
     return zeroPosition();
