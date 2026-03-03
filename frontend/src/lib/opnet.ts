@@ -13,8 +13,10 @@ import {
   ABIDataTypes,
   BitcoinAbiTypes,
 } from 'opnet';
-import { networks, address as btcAddress } from '@btc-vision/bitcoin';
+import { networks } from '@btc-vision/bitcoin';
 import type { Network } from '@btc-vision/bitcoin';
+// bech32m is a CJS package already used by the opnet bundle; Vite pre-bundles it
+import { bech32m, bech32 } from 'bech32';
 import BigNumber from 'bignumber.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -246,47 +248,82 @@ export async function fetchAPY(): Promise<number> {
 }
 
 /**
- * Convert a raw byte array to an OP_NET Address-compatible object.
+ * Wrap 32 raw bytes in an OP_NET Address-compatible object.
  *
- * The OP_NET SDK checks `'equals' in value` to detect an Address object.
- * Passing a plain string fails that check ("Cannot use 'in' operator to search
- * for 'equals' in <string>").  We create a 32-byte Uint8Array and attach an
- * `equals` method — exactly what the SDK needs, without importing the full
- * Address class (which transitively imports @noble/hashes/sha2 that is not
- * exported by @noble/hashes v2 installed in this project).
+ * The SDK (opnet/browser/index.js line 5244) checks `'equals' in value` to
+ * detect an Address object before encoding it in the calldata.  Passing a raw
+ * string fails that check with "Cannot use 'in' operator to search for 'equals'
+ * in <string>" because the `in` operator cannot be used on primitives.
+ *
+ * We create a 32-byte Uint8Array and attach an `.equals()` method — exactly
+ * what the SDK needs.  The Uint8Array is then serialised by `writeBytes()` via
+ * the `byteLength` + indexed access, which works correctly.
  */
 function makeAddress(bytes: Uint8Array): any {
   const addr = new Uint8Array(32);
-  addr.set(bytes.slice(0, 32));
-  // Attach equals so the SDK recognises this as an Address (not a plain string)
-  (addr as any).equals = (other: Uint8Array): boolean => {
-    if (addr.length !== other.length) return false;
-    for (let i = 0; i < addr.length; i++) if (addr[i] !== other[i]) return false;
+  addr.set(bytes.length <= 32 ? bytes : bytes.slice(0, 32));
+  // equals() required by the SDK's 'equals' in value check
+  (addr as any).equals = (other: any): boolean => {
+    if (!other || other.length !== 32) return false;
+    for (let i = 0; i < 32; i++) if (addr[i] !== other[i]) return false;
     return true;
   };
   return addr;
 }
 
 /**
- * Decode a bech32/bech32m wallet address string to an OP_NET Address object.
+ * Decode a bech32 or bech32m wallet address to an OP_NET Address object.
  *
- * opt1pp... addresses are bech32m (version 1) with a 32-byte witness program.
- * Those 32 bytes are the x-only tweaked pubkey stored as Blockchain.tx.sender.
+ * opt1pp... addresses are bech32m (version ≥ 1) with a 32-byte witness program.
+ * Those 32 bytes are the x-only tweaked pubkey that OP_NET stores as
+ * Blockchain.tx.sender — so this is the correct storage key to look up.
+ *
+ * Uses the `bech32` npm package directly (already installed as a transitive dep
+ * of @btc-vision/transaction) to avoid any import-resolution issues.
  */
 function toOpNetAddress(addrStr: string): any {
   console.log('[BTCStake] toOpNetAddress → decoding:', addrStr);
+
+  // ── Attempt A: bech32m (opt1pp... / tb1p... version ≥ 1) ────────────────
   try {
-    const decoded = btcAddress.fromBech32(addrStr);
-    const bytes   = new Uint8Array(decoded.data);
-    console.log('[BTCStake] toOpNetAddress → version:', decoded.version,
-      '| dataLen:', bytes.length, '| prefix:', decoded.prefix,
+    const decoded = bech32m.decode(addrStr, 200);
+    const dataWords = decoded.words.slice(1); // strip witness version byte
+    const bytes = Uint8Array.from(bech32m.fromWords(dataWords));
+    console.log('[BTCStake] toOpNetAddress → bech32m OK | version:', decoded.words[0],
+      '| prefix:', decoded.prefix, '| dataLen:', bytes.length,
       '| hex:', Buffer.from(bytes).toString('hex'));
     return makeAddress(bytes);
-  } catch (e: any) {
-    console.warn('[BTCStake] toOpNetAddress → fromBech32 failed:', e?.message);
-    // Last resort: return the raw string so we at least see the SDK error in logs
-    return addrStr;
+  } catch (e1: any) {
+    console.log('[BTCStake] toOpNetAddress → bech32m failed:', e1?.message);
   }
+
+  // ── Attempt B: bech32 (tb1q... version 0, 20-byte P2WPKH) ──────────────
+  try {
+    const decoded = bech32.decode(addrStr, 200);
+    const dataWords = decoded.words.slice(1);
+    const bytes = Uint8Array.from(bech32.fromWords(dataWords));
+    console.log('[BTCStake] toOpNetAddress → bech32 OK | version:', decoded.words[0],
+      '| prefix:', decoded.prefix, '| dataLen:', bytes.length,
+      '| hex:', Buffer.from(bytes).toString('hex'));
+    return makeAddress(bytes); // 20 bytes → padded to 32 with zeroes
+  } catch (e2: any) {
+    console.log('[BTCStake] toOpNetAddress → bech32 also failed:', e2?.message);
+  }
+
+  // ── Attempt C: hex string (0x...) ────────────────────────────────────────
+  try {
+    const hex = addrStr.startsWith('0x') ? addrStr.slice(2) : addrStr;
+    if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+      const bytes = new Uint8Array(Buffer.from(hex, 'hex'));
+      console.log('[BTCStake] toOpNetAddress → hex OK | hex:', hex);
+      return makeAddress(bytes);
+    }
+  } catch {}
+
+  // ── Nothing worked — return raw string so SDK throws a readable error ─────
+  console.error('[BTCStake] toOpNetAddress → ALL decode attempts failed for:', addrStr,
+    '— passing raw string, SDK will throw');
+  return addrStr;
 }
 
 /**

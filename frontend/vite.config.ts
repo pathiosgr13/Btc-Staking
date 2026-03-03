@@ -13,7 +13,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    include: ['buffer', 'bignumber.js'],
+    include: ['buffer', 'bignumber.js', 'bech32'],
   },
   build: {
     chunkSizeWarningLimit: 1500,
