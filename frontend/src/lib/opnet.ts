@@ -151,29 +151,50 @@ async function getStakingContract(provider?: AnyProvider) {
  *   The singleton is reset on failure so the next call gets a fresh connection.
  */
 export async function fetchBalance(address: string, walletProvider?: any): Promise<bigint> {
+  console.log('[BTCStake] fetchBalance → address:', address, '| has walletProvider:', !!walletProvider);
+
   // Strategy 1: ask the wallet extension directly — matches wallet UI exactly
   if (walletProvider?.getBalance) {
     try {
+      console.log('[BTCStake] fetchBalance → calling walletProvider.getBalance()...');
       const raw = await walletProvider.getBalance();
+      console.log('[BTCStake] fetchBalance → raw result:', typeof raw, JSON.stringify(raw));
+
       // OP_WALLET and UniSat both return { confirmed, unconfirmed, total } in sats
-      if (raw != null && typeof raw === 'object' && 'confirmed' in raw) {
-        return BigInt(Math.round(Number(raw.confirmed)));
+      if (raw != null && typeof raw === 'object') {
+        console.log('[BTCStake] fetchBalance → object keys:', Object.keys(raw));
+        // Prefer 'confirmed', fall back to 'total'
+        const amount = raw.confirmed ?? raw.total ?? raw.balance ?? raw.amount;
+        if (amount !== undefined && amount !== null) {
+          const sats = BigInt(Math.round(Number(amount)));
+          console.log('[BTCStake] fetchBalance → sats from object:', sats.toString(), '(field used:', raw.confirmed !== undefined ? 'confirmed' : raw.total !== undefined ? 'total' : 'other', ')');
+          return sats;
+        }
+        console.warn('[BTCStake] fetchBalance → object has no recognized balance field:', raw);
       }
       // Older / alternative formats: plain number, bigint, or numeric string
       if (typeof raw === 'number' || typeof raw === 'bigint' || typeof raw === 'string') {
-        return BigInt(Math.round(Number(raw)));
+        const sats = BigInt(Math.round(Number(raw)));
+        console.log('[BTCStake] fetchBalance → sats from primitive:', sats.toString());
+        return sats;
       }
-    } catch {
+    } catch (e: any) {
+      console.warn('[BTCStake] fetchBalance → walletProvider.getBalance() threw:', e?.message ?? e);
       // Fall through to RPC
     }
+  } else {
+    console.log('[BTCStake] fetchBalance → walletProvider.getBalance not available, skipping to RPC');
   }
 
   // Strategy 2: OP_NET RPC — filterOrdinals=true to count only spendable UTXOs
   try {
+    console.log('[BTCStake] fetchBalance → trying RPC getBalance for:', address);
     const provider = await getReadProvider();
     const sats = await (provider as any).getBalance(address, true);
+    console.log('[BTCStake] fetchBalance → RPC raw sats:', sats?.toString());
     return BigInt(sats?.toString() ?? '0');
-  } catch {
+  } catch (e: any) {
+    console.warn('[BTCStake] fetchBalance → RPC getBalance failed:', e?.message ?? e);
     _provider = null; // reset singleton so next call reconnects cleanly
     return 0n;
   }
@@ -227,79 +248,123 @@ export async function fetchAPY(): Promise<number> {
 /**
  * Fetch the on-chain staked amount, pending rewards and stake block for a user.
  *
- * Three-layer decode strategy so we handle every SDK response variant:
+ * The contract stores positions keyed by Blockchain.tx.sender, which in OP_NET
+ * is the compressed secp256k1 public key (33 bytes, hex-encoded). Passing the
+ * bech32 address (20-byte witness program) produces a different storage key and
+ * returns 0. We therefore try the publicKey first, then fall back to address.
  *
+ * Three-layer decode strategy so we handle every SDK response variant:
  *  1. Primary  — res.properties (ABI-named fields, set by SDK's setDecoded())
  *  2. Fallback — res.result BinaryReader, read 3 × uint256 sequentially
  *  3. Guard    — catch all errors and return zero position (never throw)
- *
- * Returning zeros on error means the UI can still render TVL/APY even when
- * the position call fails, and the position display stays neutral (not broken).
  */
-export async function fetchUserPosition(address: string): Promise<UserPosition> {
-  console.log('[BTCStake] fetchUserPosition → address:', address);
+export async function fetchUserPosition(address: string, publicKey?: string): Promise<UserPosition> {
+  console.log('[BTCStake] ── fetchUserPosition called ──────────────────────────');
+  console.log('[BTCStake] fetchUserPosition → bech32 address :', address);
+  console.log('[BTCStake] fetchUserPosition → publicKey (hex):', publicKey ?? '(not provided)');
+
+  // Helper: decode one getUserPosition response
+  async function tryGetPosition(key: string, label: string): Promise<UserPosition | null> {
+    console.log(`[BTCStake] getUserPosition → calling contract with ${label}:`, key);
+    try {
+      const c   = await getStakingContract();
+      const res = await (c as any).getUserPosition(key);
+
+      // ── Dump the full raw response ─────────────────────────────────────
+      console.log(`[BTCStake] getUserPosition (${label}) → typeof res:`, typeof res, '| null?', res == null);
+      if (res != null) {
+        console.log(`[BTCStake] getUserPosition (${label}) → res.keys:`, Object.keys(res));
+        console.log(`[BTCStake] getUserPosition (${label}) → res.revert:`, res.revert ?? '(none)');
+        console.log(`[BTCStake] getUserPosition (${label}) → res.properties:`, res.properties ?? '(none)');
+        console.log(`[BTCStake] getUserPosition (${label}) → res.result type:`, typeof res.result, '| has readU256?', typeof res.result?.readU256);
+        // Try full JSON dump — bigints serialised as strings
+        try {
+          const dump = JSON.stringify(res, (_, v) =>
+            typeof v === 'bigint' ? v.toString() + 'n' : v
+          );
+          console.log(`[BTCStake] getUserPosition (${label}) → full JSON:`, dump);
+        } catch (e) {
+          console.log(`[BTCStake] getUserPosition (${label}) → cannot JSON.stringify:`, e);
+        }
+      }
+
+      if (res?.revert) {
+        console.warn(`[BTCStake] getUserPosition (${label}) → reverted:`, res.revert);
+        return null;
+      }
+
+      // Primary: SDK-decoded named properties
+      const p = res?.properties;
+      console.log(`[BTCStake] getUserPosition (${label}) → properties (stringified):`, {
+        stakedAmount:  p?.stakedAmount  != null ? p.stakedAmount.toString()  : 'undefined',
+        pendingReward: p?.pendingReward != null ? p.pendingReward.toString() : 'undefined',
+        stakeBlock:    p?.stakeBlock    != null ? p.stakeBlock.toString()    : 'undefined',
+      });
+
+      if (p?.stakedAmount !== undefined && p?.stakedAmount !== null) {
+        const position = {
+          stakedAmount:  satsToBTC(p.stakedAmount.toString()),
+          pendingReward: satsToBTC((p.pendingReward ?? 0n).toString()),
+          stakeBlock:    BigInt((p.stakeBlock ?? 0n).toString()),
+        };
+        console.log(`[BTCStake] getUserPosition (${label}) → decoded via properties:`, {
+          stakedBTC:  position.stakedAmount.toFixed(8),
+          pendingBTC: position.pendingReward.toFixed(8),
+          stakeBlock: position.stakeBlock.toString(),
+        });
+        return position;
+      }
+
+      // Fallback: raw BinaryReader — 3 × 32-byte uint256
+      const reader = res?.result;
+      if (reader?.setOffset && reader?.readU256) {
+        console.log(`[BTCStake] getUserPosition (${label}) → trying BinaryReader fallback…`);
+        reader.setOffset(0);
+        const stakedSats  = reader.readU256();
+        const pendingSats = reader.readU256();
+        const blk         = reader.readU256();
+        console.log(`[BTCStake] getUserPosition (${label}) → BinaryReader raw values:`, {
+          stakedSats:  stakedSats.toString(),
+          pendingSats: pendingSats.toString(),
+          blk:         blk.toString(),
+        });
+        return {
+          stakedAmount:  satsToBTC(stakedSats.toString()),
+          pendingReward: satsToBTC(pendingSats.toString()),
+          stakeBlock:    blk,
+        };
+      }
+
+      console.warn(`[BTCStake] getUserPosition (${label}) → no decodable data`);
+      return null;
+    } catch (err: any) {
+      console.warn(`[BTCStake] getUserPosition (${label}) → threw:`, err?.message ?? err);
+      return null;
+    }
+  }
+
   try {
-    const c   = await getStakingContract();
-    const res = await (c as any).getUserPosition(address);
-
-    // ── Dump the raw response so we can see exactly what came back ──────────
-    console.log('[BTCStake] getUserPosition raw response:', {
-      revert:     res?.revert ?? null,
-      properties: res?.properties ?? null,
-      hasResult:  !!res?.result,
-      resultLen:  res?.result?.length?.() ?? 'n/a',
-    });
-
-    if (res?.revert) {
-      console.warn('[BTCStake] getUserPosition reverted:', res.revert);
-      return zeroPosition();
+    // ── Attempt 1: compressed pubkey (matches Blockchain.tx.sender in OP_NET) ──
+    if (publicKey) {
+      const pos = await tryGetPosition(publicKey, 'publicKey');
+      if (pos && pos.stakedAmount.gt(0)) {
+        console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via publicKey');
+        return pos;
+      }
+      console.log('[BTCStake] fetchUserPosition → publicKey gave 0 or null, trying address…');
     }
 
-    // Primary: SDK-decoded named properties
-    const p = res?.properties;
-    console.log('[BTCStake] getUserPosition properties (raw bigints):', {
-      stakedAmount:  p?.stakedAmount  != null ? p.stakedAmount.toString()  : 'undefined',
-      pendingReward: p?.pendingReward != null ? p.pendingReward.toString() : 'undefined',
-      stakeBlock:    p?.stakeBlock    != null ? p.stakeBlock.toString()    : 'undefined',
-    });
-
-    if (p?.stakedAmount !== undefined && p?.stakedAmount !== null) {
-      const position = {
-        stakedAmount:  satsToBTC(p.stakedAmount.toString()),
-        pendingReward: satsToBTC((p.pendingReward ?? 0n).toString()),
-        stakeBlock:    BigInt((p.stakeBlock ?? 0n).toString()),
-      };
-      console.log('[BTCStake] getUserPosition → decoded position:', {
-        stakedBTC:  position.stakedAmount.toFixed(8),
-        pendingBTC: position.pendingReward.toFixed(8),
-        stakeBlock: position.stakeBlock.toString(),
-      });
-      return position;
+    // ── Attempt 2: bech32 address ──────────────────────────────────────────────
+    const pos = await tryGetPosition(address, 'address');
+    if (pos) {
+      console.log('[BTCStake] fetchUserPosition → result via address:', pos.stakedAmount.toFixed(8), 'tBTC');
+      return pos;
     }
 
-    // Fallback: read directly from the raw BinaryReader (3 × 32-byte uint256)
-    const reader = res?.result;
-    if (reader?.setOffset && reader?.readU256) {
-      reader.setOffset(0);
-      const stakedSats  = reader.readU256();
-      const pendingSats = reader.readU256();
-      const blk         = reader.readU256();
-      console.log('[BTCStake] getUserPosition → BinaryReader fallback:', {
-        stakedSats:  stakedSats.toString(),
-        pendingSats: pendingSats.toString(),
-        blk:         blk.toString(),
-      });
-      return {
-        stakedAmount:  satsToBTC(stakedSats.toString()),
-        pendingReward: satsToBTC(pendingSats.toString()),
-        stakeBlock:    blk,
-      };
-    }
-
-    console.warn('[BTCStake] getUserPosition: no decodable data in response — returning zero');
+    console.warn('[BTCStake] fetchUserPosition → all attempts returned null/zero');
     return zeroPosition();
   } catch (err: any) {
-    console.warn('[BTCStake] fetchUserPosition error:', err?.message ?? err);
+    console.warn('[BTCStake] fetchUserPosition → outer catch:', err?.message ?? err);
     return zeroPosition();
   }
 }

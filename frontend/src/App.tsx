@@ -26,7 +26,7 @@ export default function App() {
   const [page, setPage] = useState<AppPage>('stake');
 
   const wallet   = useWallet();
-  const staking  = useStaking(wallet.address, wallet.provider);
+  const staking  = useStaking(wallet.address, wallet.provider, wallet.publicKey);
   const referral = useReferral(wallet.address);
 
   const apy      = staking.apyBps / 100;

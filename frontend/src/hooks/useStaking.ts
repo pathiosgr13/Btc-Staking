@@ -44,7 +44,7 @@ const EMPTY_POSITION: UserPosition = {
   stakeBlock:    0n,
 };
 
-export function useStaking(address: string | null, walletProvider: any) {
+export function useStaking(address: string | null, walletProvider: any, publicKey?: string | null) {
   const [data, setData] = useState<StakingData>({
     tvl:       new BigNumber(0),
     apyBps:    1200,
@@ -93,15 +93,17 @@ export function useStaking(address: string | null, walletProvider: any) {
       // internally and returns zeroPosition(), so this never throws.
       // TVL / APY are therefore always displayed even if the user's position
       // call fails (e.g. revert, wrong address encoding, RPC hiccup).
+      // Pass publicKey too — OP_NET stores positions by compressed pubkey
+      // (Blockchain.tx.sender), so the pubkey lookup is tried first.
       const position = address
-        ? await fetchUserPosition(address)
+        ? await fetchUserPosition(address, publicKey ?? undefined)
         : EMPTY_POSITION;
 
       setData({ tvl, apyBps, btcPrice, position, isLoading: false, error: null });
     } catch (err: any) {
       setData(prev => ({ ...prev, isLoading: false, error: err?.message ?? 'Fetch error' }));
     }
-  }, [address]);
+  }, [address, publicKey]);
 
   useEffect(() => {
     refresh();
