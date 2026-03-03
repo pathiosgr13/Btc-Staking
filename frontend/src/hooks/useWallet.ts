@@ -139,6 +139,25 @@ export function useWallet() {
 
       if (!accounts[0]) throw new Error('No accounts returned');
 
+      // ── Dump ALL wallet address properties for debugging ─────────────────
+      console.log('[BTCStake] useWallet → requestAccounts() result:', accounts);
+      console.log('[BTCStake] useWallet → publicKey (hex):', publicKey);
+      console.log('[BTCStake] useWallet → network:', network);
+      try {
+        const wp = detectProvider();
+        console.log('[BTCStake] useWallet → provider.selectedAddress:', wp?.selectedAddress);
+        console.log('[BTCStake] useWallet → provider.accounts (sync):', wp?.accounts);
+        if (typeof wp?.getAccounts === 'function') {
+          const ga = await wp.getAccounts();
+          console.log('[BTCStake] useWallet → provider.getAccounts():', ga);
+        }
+        // Dump all provider keys so we can spot any undocumented address fields
+        console.log('[BTCStake] useWallet → provider keys:', Object.keys(wp ?? {}));
+      } catch (e: any) {
+        console.warn('[BTCStake] useWallet → address dump threw:', e?.message);
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       const address = accounts[0];
 
       // Set the provider ref before fetching balance so Strategy 1 (wallet API)

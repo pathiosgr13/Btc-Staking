@@ -344,6 +344,70 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   console.log('[BTCStake] fetchUserPosition → bech32 address :', address);
   console.log('[BTCStake] fetchUserPosition → publicKey (hex):', publicKey ?? '(not provided)');
 
+  // ── Sanity check: call getTVL first to confirm the contract responds at all ─
+  try {
+    const tvlResult = await fetchTVL();
+    console.log('[BTCStake] fetchUserPosition → getTVL sanity check OK — TVL:', tvlResult.toFixed(8), 'tBTC');
+  } catch (tvlErr: any) {
+    console.warn('[BTCStake] fetchUserPosition → getTVL sanity check FAILED:', tvlErr?.message ?? tvlErr);
+    console.warn('[BTCStake] → contract may be unreachable or wrong address');
+  }
+
+  // ── Enumerate ALL addresses the wallet exposes ────────────────────────────
+  // Collect every address format so we can try each as the getUserPosition key.
+  const candidateMap = new Map<string, string>(); // label → address string
+
+  // The primary address passed in from useWallet (requestAccounts()[0])
+  if (address) candidateMap.set('primary(requestAccounts[0])', address);
+
+  // Mine window.opnet / window.unisat for any other addresses
+  try {
+    const wp = (typeof window !== 'undefined')
+      ? (window as any).opnet ?? (window as any).unisat ?? (window as any).okxwallet?.bitcoin
+      : null;
+
+    if (wp) {
+      // selectedAddress — synchronous property exposed by some wallets
+      const sel = wp.selectedAddress;
+      if (sel && typeof sel === 'string' && sel !== address)
+        candidateMap.set('window.opnet.selectedAddress', sel);
+
+      // accounts — some wallets expose it as a cached array
+      const accs = wp.accounts;
+      if (Array.isArray(accs)) {
+        accs.forEach((a: string, i: number) => {
+          if (a && typeof a === 'string' && !candidateMap.has(`accounts[${i}]`))
+            candidateMap.set(`window.opnet.accounts[${i}]`, a);
+        });
+      }
+
+      // getAccounts() — async getter, may return more formats
+      if (typeof wp.getAccounts === 'function') {
+        try {
+          const asyncAccs: string[] = await wp.getAccounts();
+          console.log('[BTCStake] window.opnet.getAccounts() →', asyncAccs);
+          asyncAccs.forEach((a: string, i: number) => {
+            if (a && typeof a === 'string')
+              candidateMap.set(`getAccounts()[${i}]`, a);
+          });
+        } catch (e: any) {
+          console.warn('[BTCStake] window.opnet.getAccounts() threw:', e?.message);
+        }
+      }
+
+      // Log full wallet surface
+      console.log('[BTCStake] window.opnet keys:', Object.keys(wp));
+      console.log('[BTCStake] window.opnet.selectedAddress:', wp.selectedAddress);
+      console.log('[BTCStake] window.opnet.accounts:', wp.accounts);
+    } else {
+      console.warn('[BTCStake] window.opnet / window.unisat not found');
+    }
+  } catch (e: any) {
+    console.warn('[BTCStake] enumerating wallet addresses threw:', e?.message);
+  }
+
+  console.log('[BTCStake] fetchUserPosition → candidate addresses:', [...candidateMap.entries()]);
+
   // Helper: decode one getUserPosition response
   async function tryGetPosition(key: any, label: string): Promise<UserPosition | null> {
     const keyDisplay = typeof key === 'string' ? key : Buffer.from(key).toString('hex');
@@ -426,39 +490,49 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   }
 
   try {
-    // ── Attempt 1: bech32m address decoded to Address object ──────────────────
-    // opt1pp... → 32-byte x-only tweaked pubkey = what Blockchain.tx.sender stores
-    const addrObj = toOpNetAddress(address);
-    const pos1 = await tryGetPosition(addrObj, 'address→Address');
-    if (pos1 && pos1.stakedAmount.gt(0)) {
-      console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via decoded address');
-      return pos1;
-    }
-    console.log('[BTCStake] fetchUserPosition → decoded address gave 0 or null');
+    let lastZeroPos: UserPosition | null = null;
 
-    // ── Attempt 2: publicKey as Address (hex compressed pubkey → Address) ──────
-    // Some OP_NET versions may use the compressed pubkey bytes instead of taproot key
+    // ── Attempt A: try every wallet-exposed address decoded to Address object ──
+    for (const [label, addrStr] of candidateMap) {
+      const addrObj = toOpNetAddress(addrStr);
+      const pos = await tryGetPosition(addrObj, `${label}→Address`);
+      if (pos && pos.stakedAmount.gt(0)) {
+        console.log(`[BTCStake] fetchUserPosition → ✓ non-zero via "${label}":`, pos.stakedAmount.toFixed(8));
+        return pos;
+      }
+      if (pos) lastZeroPos = pos;
+    }
+
+    // ── Attempt B: publicKey x-only bytes as Address ──────────────────────────
     if (publicKey) {
-      console.log('[BTCStake] fetchUserPosition → trying publicKey fallback:', publicKey);
+      console.log('[BTCStake] fetchUserPosition → trying publicKey x-only fallback:', publicKey);
       try {
         const pubKeyBytes = new Uint8Array(Buffer.from(publicKey.replace(/^0x/, ''), 'hex'));
-        // x-only = drop the 02/03 prefix byte (bytes 1..33)
         const xOnly = pubKeyBytes.length === 33 ? pubKeyBytes.slice(1) : pubKeyBytes;
         const pubAddr = makeAddress(xOnly);
-        const pos2 = await tryGetPosition(pubAddr, 'publicKey→Address');
+        const pos = await tryGetPosition(pubAddr, 'publicKey-xOnly→Address');
+        if (pos && pos.stakedAmount.gt(0)) {
+          console.log('[BTCStake] fetchUserPosition → ✓ non-zero via publicKey x-only');
+          return pos;
+        }
+        if (pos) lastZeroPos = pos;
+
+        // Also try the full compressed pubkey (02/03 + 32 bytes) padded into 32
+        const fullAddr = makeAddress(pubKeyBytes.length === 33 ? pubKeyBytes.slice(0, 32) : pubKeyBytes);
+        const pos2 = await tryGetPosition(fullAddr, 'publicKey-compressed→Address');
         if (pos2 && pos2.stakedAmount.gt(0)) {
-          console.log('[BTCStake] fetchUserPosition → ✓ got non-zero result via publicKey Address');
+          console.log('[BTCStake] fetchUserPosition → ✓ non-zero via publicKey compressed bytes');
           return pos2;
         }
-        console.log('[BTCStake] fetchUserPosition → publicKey Address also gave 0 or null');
+        if (pos2) lastZeroPos = pos2;
       } catch (pkErr: any) {
         console.warn('[BTCStake] fetchUserPosition → publicKey decode failed:', pkErr?.message);
       }
     }
 
-    // ── Attempt 3: return whatever Attempt 1 gave (zero position) ─────────────
-    console.warn('[BTCStake] fetchUserPosition → all attempts gave 0 — returning zero position');
-    return pos1 ?? zeroPosition();
+    console.warn('[BTCStake] fetchUserPosition → all attempts returned 0 — staked amount not found');
+    console.warn('[BTCStake] → check that the stake tx sender address matches one of the candidates above');
+    return lastZeroPos ?? zeroPosition();
   } catch (err: any) {
     console.warn('[BTCStake] fetchUserPosition → outer catch:', err?.message ?? err);
     return zeroPosition();
