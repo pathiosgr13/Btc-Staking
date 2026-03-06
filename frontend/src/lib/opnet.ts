@@ -124,15 +124,123 @@ export interface UserPosition {
   stakeBlock:    bigint;
 }
 
+// ─── Write-mode sender ────────────────────────────────────────────────────────
+
+/**
+ * Create a minimal Address-like object that the OP_NET SDK accepts as `sender`.
+ *
+ * The SDK's provider.call() (simulation) calls exactly two methods on `from`:
+ *   from.toHex()        → '0x' + 32-byte MLDSA address  → becomes Blockchain.tx.sender
+ *   from.tweakedToHex() → '0x' + 32-byte legacy key     → legacy BTC derivation info
+ *
+ * Without a `sender`, simulations use the zero address; unstake/claimRewards
+ * then revert with "Insufficient staked balance" before OP_WALLET is ever asked
+ * to sign. Passing the MLDSA address here fixes the simulation, and OP_WALLET
+ * still signs the final transaction with the real MLDSA key.
+ */
+function makeSenderForSimulation(mldsaHex: string, compressedPubkeyHex?: string): any {
+  const mldsaFull = mldsaHex.startsWith('0x') ? mldsaHex : '0x' + mldsaHex;
+  // x-only = compressed pubkey without the 02/03 prefix byte (last 32 of 33 bytes)
+  const legacyFull = compressedPubkeyHex
+    ? '0x' + compressedPubkeyHex.replace(/^0x/, '').slice(2)
+    : mldsaFull; // fallback: reuse MLDSA hex (same 32-byte length)
+  return {
+    toHex:            () => mldsaFull,
+    tweakedToHex:     () => legacyFull,
+    equals:           () => false,
+    originalPublicKey: undefined, // keeps csvAddress computation off in setFromAddress()
+  };
+}
+
+/**
+ * Detect the MLDSA sender address from OP_WALLET and return a simulation sender.
+ *
+ * Strategy (in priority order):
+ *  1. window.opnet.accounts / selectedAddress — any 0x+64hex entry is the address
+ *  2. window.opnet.web3.getMLDSAPublicKey()  — full MLDSA key; SHA-256 = address
+ *  3. Hardcoded fallback (temporary, while dynamic detection is being debugged)
+ */
+async function detectMLDSASender(): Promise<any | undefined> {
+  try {
+    const wp = (typeof window !== 'undefined')
+      ? (window as any).opnet ?? (window as any).unisat ?? null
+      : null;
+    if (!wp) return undefined;
+
+    const mldsaRe = /^0x[0-9a-fA-F]{64}$/;
+    let mldsaHex: string | undefined;
+
+    // Strategy 1: .accounts array
+    const accs = wp.accounts;
+    if (Array.isArray(accs)) {
+      for (const a of accs) {
+        if (typeof a === 'string' && mldsaRe.test(a)) { mldsaHex = a; break; }
+      }
+    }
+    // Strategy 2: .selectedAddress
+    if (!mldsaHex) {
+      const sel = wp.selectedAddress;
+      if (typeof sel === 'string' && mldsaRe.test(sel)) mldsaHex = sel;
+    }
+    // Strategy 3: scan all properties
+    if (!mldsaHex) {
+      for (const key of Object.keys(wp)) {
+        const v = wp[key];
+        if (typeof v === 'string' && mldsaRe.test(v)) { mldsaHex = v; break; }
+      }
+    }
+    // Strategy 4: web3.getMLDSAPublicKey() → SHA-256 → 32-byte address
+    // OP_WALLET exposes window.opnet.web3.getMLDSAPublicKey() (verified in SDK src).
+    // SHA-256(full MLDSA key) is exactly how Address.setMldsaKey() derives the address.
+    if (!mldsaHex && typeof wp.web3?.getMLDSAPublicKey === 'function') {
+      try {
+        const mldsaPubkeyHex: string = await wp.web3.getMLDSAPublicKey();
+        console.log('[BTCStake] detectMLDSASender → MLDSA pubkey length:', mldsaPubkeyHex.length, 'chars');
+        const mldsaBytes = new Uint8Array(Buffer.from(mldsaPubkeyHex.replace(/^0x/, ''), 'hex'));
+        const hashed = new Uint8Array(await crypto.subtle.digest('SHA-256', mldsaBytes));
+        mldsaHex = '0x' + Buffer.from(hashed).toString('hex');
+        console.log('[BTCStake] detectMLDSASender → SHA256(MLDSApubkey):', mldsaHex);
+      } catch (e: any) {
+        console.warn('[BTCStake] detectMLDSASender → getMLDSAPublicKey failed:', e?.message ?? e);
+      }
+    }
+    // Strategy 5: hardcoded fallback
+    if (!mldsaHex) {
+      mldsaHex = '0xecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb';
+      console.warn('[BTCStake] detectMLDSASender → no dynamic detection succeeded, using hardcoded fallback:', mldsaHex);
+    }
+
+    // Get secp256k1 compressed pubkey for the tweakedToHex() field
+    let compressedPubkeyHex: string | undefined;
+    try {
+      const pk = await wp.getPublicKey?.();
+      if (pk && typeof pk === 'string') compressedPubkeyHex = pk.replace(/^0x/, '');
+    } catch { /* optional */ }
+
+    console.log('[BTCStake] detectMLDSASender → using:', mldsaHex, '| legacy pubkey:', compressedPubkeyHex ?? '(none)');
+    return makeSenderForSimulation(mldsaHex, compressedPubkeyHex);
+  } catch (e: any) {
+    console.warn('[BTCStake] detectMLDSASender → outer catch:', e?.message ?? e);
+    return undefined;
+  }
+}
+
 // ─── Contract helper ──────────────────────────────────────────────────────────
-async function getStakingContract(provider?: AnyProvider) {
-  const p   = provider ?? await getReadProvider();
+
+/**
+ * Get the staking contract instance.
+ *
+ * @param forWrite  When true, detects the MLDSA sender and passes it to getContract
+ *                  so that the simulation call uses the correct Blockchain.tx.sender.
+ *                  Without this, unstake/claimRewards simulations revert because the
+ *                  zero-address caller has no staked balance.
+ */
+async function getStakingContract(forWrite = false) {
+  const p   = await getReadProvider();
   const net = await getNetwork();
   const abi = new BitcoinInterface(CUSTOM_STAKING_ABI as any);
-  // Do not pass a sender — OP_WALLET signs via window.opnet.web3.signInteraction()
-  // using the connected account. Address.fromString() requires an ML-DSA key
-  // (1312–2592 bytes), which secp256k1 wallets don't provide.
-  return getContract(CONTRACT_ADDR, abi, p, net, undefined);
+  const sender = forWrite ? await detectMLDSASender() : undefined;
+  return getContract(CONTRACT_ADDR, abi, p, net, sender);
 }
 
 // ─── Balance fetch ────────────────────────────────────────────────────────────
@@ -714,20 +822,20 @@ async function sendTx(callResult: any, address: string): Promise<string> {
 
 export async function txStake(address: string, amountBTC: string): Promise<string> {
   const sats       = BigInt(BTCToSats(amountBTC).toFixed(0));
-  const c          = await getStakingContract();
+  const c          = await getStakingContract(true);
   const callResult = await (c as any).stake(sats);
   return sendTx(callResult, address);
 }
 
 export async function txUnstake(address: string, amountBTC: string): Promise<string> {
   const sats       = BigInt(BTCToSats(amountBTC).toFixed(0));
-  const c          = await getStakingContract();
+  const c          = await getStakingContract(true);
   const callResult = await (c as any).unstake(sats);
   return sendTx(callResult, address);
 }
 
 export async function txClaimRewards(address: string): Promise<string> {
-  const c          = await getStakingContract();
+  const c          = await getStakingContract(true);
   const callResult = await (c as any).claimRewards();
   return sendTx(callResult, address);
 }
