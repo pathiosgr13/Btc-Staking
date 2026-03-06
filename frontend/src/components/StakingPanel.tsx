@@ -8,19 +8,22 @@ import BigNumber from 'bignumber.js';
 type Tab = 'stake' | 'unstake' | 'claim';
 
 interface StakingPanelProps {
-  connected:      boolean;
-  stakedAmount:   BigNumber;
-  pendingReward:  BigNumber;
-  walletBalance:  bigint;
-  btcPrice:       number;
-  stakeState:     TxState;
-  unstakeState:   TxState;
-  claimState:     TxState;
-  onStake:        (amount: string) => void;
-  onUnstake:      (amount: string) => void;
-  onClaimRewards: () => void;
-  onResetTx:      (type: 'stake' | 'unstake' | 'claim') => void;
-  onConnect:      () => void;
+  connected:       boolean;
+  stakedAmount:    BigNumber;
+  /** Real claimable rewards from the contract (may be 0 if rewardRate not set). */
+  pendingReward:   BigNumber;
+  /** Client-side estimate shown when contract reports 0 (non-claimable). */
+  estimatedReward: BigNumber;
+  walletBalance:   bigint;
+  btcPrice:        number;
+  stakeState:      TxState;
+  unstakeState:    TxState;
+  claimState:      TxState;
+  onStake:         (amount: string) => void;
+  onUnstake:       (amount: string) => void;
+  onClaimRewards:  () => void;
+  onResetTx:       (type: 'stake' | 'unstake' | 'claim') => void;
+  onConnect:       () => void;
 }
 
 function TxResult({ state, type, onReset }: { state: TxState; type: 'stake' | 'unstake' | 'claim'; onReset: () => void }) {
@@ -154,7 +157,7 @@ function AmountInput({
 }
 
 export function StakingPanel({
-  connected, stakedAmount, pendingReward, walletBalance, btcPrice,
+  connected, stakedAmount, pendingReward, estimatedReward, walletBalance, btcPrice,
   stakeState, unstakeState, claimState,
   onStake, onUnstake, onClaimRewards, onResetTx, onConnect,
 }: StakingPanelProps) {
@@ -358,16 +361,54 @@ export function StakingPanel({
               transition={{ duration: 0.2 }}
               className="text-center"
             >
-              <div className="bg-gradient-to-br from-btc-orange/10 to-btc-gold/5 border border-btc-orange/20 rounded-2xl p-6 mb-5">
-                <p className="text-btc-muted text-sm mb-2">Claimable Rewards</p>
-                <p className="text-4xl font-bold text-transparent bg-clip-text bg-gold-gradient animate-glow">
-                  {pendingReward.toFixed(8)}
+              {/* ── Claimable rewards (real, from contract) ──────────────── */}
+              <div className={`rounded-2xl p-5 mb-3 border ${
+                pendingReward.gt(0)
+                  ? 'bg-gradient-to-br from-btc-orange/10 to-btc-gold/5 border-btc-orange/30'
+                  : 'bg-white/3 border-btc-border'
+              }`}>
+                <p className="text-btc-muted text-xs font-medium uppercase tracking-wider mb-2">
+                  Claimable Now
                 </p>
-                <p className="text-btc-orange text-base font-semibold mt-1">tBTC</p>
-                <p className="text-btc-muted text-xs mt-2">
-                  ≈ ${pendingReward.times(btcPrice).toFixed(4)} USD
-                </p>
+                {pendingReward.gt(0) ? (
+                  <>
+                    <p className="text-4xl font-bold text-transparent bg-clip-text bg-gold-gradient animate-glow">
+                      {pendingReward.toFixed(8)}
+                    </p>
+                    <p className="text-btc-orange text-sm font-semibold mt-0.5">tBTC</p>
+                    <p className="text-btc-muted text-xs mt-1.5">
+                      ≈ ${pendingReward.times(btcPrice).toFixed(4)} USD
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-btc-muted/60 text-sm py-1">
+                    0.00000000 tBTC — not yet claimable
+                  </p>
+                )}
               </div>
+
+              {/* ── Estimated accumulating rewards (client-side) ─────────── */}
+              {estimatedReward.gt(0) && pendingReward.lte(0) && (
+                <div className="rounded-xl p-4 mb-4 border border-btc-border bg-white/3 text-left">
+                  <div className="flex items-start gap-3">
+                    <div className="w-2 h-2 rounded-full bg-btc-orange/60 mt-1.5 shrink-0 animate-pulse" />
+                    <div>
+                      <p className="text-white/70 text-xs font-semibold uppercase tracking-wider mb-1">
+                        Estimated Pending
+                      </p>
+                      <p className="text-white font-mono text-lg font-bold">
+                        {estimatedReward.toFixed(8)}{' '}
+                        <span className="text-btc-orange text-sm font-semibold">tBTC</span>
+                      </p>
+                      <p className="text-btc-muted text-xs mt-1.5 leading-relaxed">
+                        Rewards accumulate every Bitcoin block (~10 min).
+                        This estimate uses 12% APY and will be available to
+                        claim once the on-chain reward rate is activated.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <TxResult state={claimState} type="claim" onReset={() => onResetTx('claim')} />
 

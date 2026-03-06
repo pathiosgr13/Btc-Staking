@@ -21,12 +21,15 @@ import {
 } from '../lib/opnet';
 
 export interface StakingData {
-  tvl:       BigNumber;
-  apyBps:    number;
-  btcPrice:  number;
-  position:  UserPosition | null;
-  isLoading: boolean;
-  error:     string | null;
+  tvl:             BigNumber;
+  apyBps:          number;
+  btcPrice:        number;
+  position:        UserPosition | null;
+  /** Client-side estimated reward (12% APY × blocks elapsed). Non-zero only when
+   *  the contract's pendingReward is 0 (rewardRate not yet set on-chain). */
+  estimatedReward: BigNumber;
+  isLoading:       boolean;
+  error:           string | null;
 }
 
 export type TxStatus = 'idle' | 'pending' | 'success' | 'error';
@@ -47,12 +50,13 @@ const EMPTY_POSITION: UserPosition = {
 
 export function useStaking(address: string | null, walletProvider: any, publicKey?: string | null) {
   const [data, setData] = useState<StakingData>({
-    tvl:       new BigNumber(0),
-    apyBps:    1200,
-    btcPrice:  65000,
-    position:  null,
-    isLoading: true,
-    error:     null,
+    tvl:             new BigNumber(0),
+    apyBps:          1200,
+    btcPrice:        65000,
+    position:        null,
+    estimatedReward: new BigNumber(0),
+    isLoading:       true,
+    error:           null,
   });
 
   const [stakeState,   setStakeState]   = useState<TxState>({ status: 'idle', txId: null, error: null });
@@ -67,9 +71,10 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
     if (!CONTRACT_ADDR) {
       const btcPrice = await fetchBtcPrice().catch(() => 65000);
       setData({
-        tvl:       new BigNumber('4.28'),
-        apyBps:    1247,
+        tvl:             new BigNumber('4.28'),
+        apyBps:          1247,
         btcPrice,
+        estimatedReward: new BigNumber(0),
         position:  address ? {
           stakedAmount:  new BigNumber('0.05'),
           pendingReward: new BigNumber('0.000142'),
@@ -90,16 +95,17 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
         fetchCurrentBlock(),
       ]);
 
-      // Position fetch is isolated: fetchUserPosition catches all errors
-      // internally and returns zeroPosition(), so this never throws.
-      let position = address
+      // Position fetch — never throws; returns zeroPosition() on any error.
+      // position.pendingReward is the REAL claimable amount from the contract.
+      // Do NOT overwrite it — if it's 0, the contract has nothing to pay out yet.
+      const position = address
         ? await fetchUserPosition(address, publicKey ?? undefined)
         : EMPTY_POSITION;
 
-      // Client-side reward estimation when the contract returns 0.
-      // The contract's rewardRate defaults to 0 on-chain until setRewardRate()
-      // is called by the deployer. Until then, estimate using the 12% APY
-      // formula: stakedAmount * 0.12 / 52560 * blocksElapsed.
+      // Client-side estimated reward — shown separately so the user understands
+      // that rewards are accruing even though the contract rate isn't set yet.
+      // Only computed when the contract itself reports 0 claimable.
+      let estimatedReward = new BigNumber(0);
       if (
         position.stakedAmount.gt(0) &&
         position.pendingReward.lte(0) &&
@@ -107,18 +113,18 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
         currentBlock > position.stakeBlock
       ) {
         const blocksElapsed = Number(currentBlock - position.stakeBlock);
-        // 12% APY per Bitcoin year (52 560 blocks): reward/block = stake * 0.12 / 52560
-        const estimated = position.stakedAmount.times(0.12).div(52560).times(blocksElapsed);
+        // 12% APY ÷ 52 560 blocks/year × elapsed blocks
+        estimatedReward = position.stakedAmount.times(0.12).div(52560).times(blocksElapsed);
         console.log(
-          '[BTCStake] useStaking → contract pendingReward=0; client-side estimate:',
-          estimated.toFixed(8), 'tBTC', '| blocksElapsed:', blocksElapsed,
+          '[BTCStake] useStaking → estimatedReward (client-side):',
+          estimatedReward.toFixed(8), 'tBTC',
+          '| blocksElapsed:', blocksElapsed,
           '| stakeBlock:', position.stakeBlock.toString(),
           '| currentBlock:', currentBlock.toString(),
         );
-        position = { ...position, pendingReward: estimated };
       }
 
-      setData({ tvl, apyBps, btcPrice, position, isLoading: false, error: null });
+      setData({ tvl, apyBps, btcPrice, position, estimatedReward, isLoading: false, error: null });
     } catch (err: any) {
       setData(prev => ({ ...prev, isLoading: false, error: err?.message ?? 'Fetch error' }));
     }

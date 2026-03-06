@@ -184,6 +184,7 @@ export default function App() {
                     connected={wallet.status === 'connected'}
                     stakedAmount={position?.stakedAmount ?? new BigNumber(0)}
                     pendingReward={position?.pendingReward ?? new BigNumber(0)}
+                    estimatedReward={staking.estimatedReward}
                     walletBalance={wallet.balance}
                     btcPrice={staking.btcPrice}
                     stakeState={staking.stakeState}
