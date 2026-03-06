@@ -272,6 +272,32 @@ function makeAddress(bytes: Uint8Array): any {
 }
 
 /**
+ * Derive the OP_NET sender address from a compressed public key.
+ *
+ * btc-runtime computes Blockchain.tx.sender as SHA256(compressedPubKey).
+ * The result is a 32-byte digest wrapped in a makeAddress() object so the
+ * SDK's `'equals' in value` check passes.
+ *
+ * @param publicKeyHex  Hex string of the 33-byte compressed pubkey (with or without 0x).
+ * @returns  { address: Address-like, hex: '0x...' } — hex is for logging/comparison.
+ */
+async function pubKeyToOpNetAddress(publicKeyHex: string): Promise<{ address: any; hex: string }> {
+  const rawHex = publicKeyHex.replace(/^0x/, '');
+  const pubKeyBytes = new Uint8Array(Buffer.from(rawHex, 'hex'));
+
+  // Use the Web Crypto API — available in every modern browser, no extra package needed.
+  const hashBuffer = await crypto.subtle.digest('SHA-256', pubKeyBytes);
+  const hashed     = new Uint8Array(hashBuffer); // always 32 bytes
+
+  const hex = '0x' + Buffer.from(hashed).toString('hex');
+  console.log('[BTCStake] pubKeyToOpNetAddress → pubkey :', '0x' + rawHex);
+  console.log('[BTCStake] pubKeyToOpNetAddress → SHA256 :', hex);
+  console.log('[BTCStake] pubKeyToOpNetAddress → first16:', hex.slice(0, 18), '(compare with expected)');
+
+  return { address: makeAddress(hashed), hex };
+}
+
+/**
  * Decode a bech32 or bech32m wallet address to an OP_NET Address object.
  *
  * opt1pp... addresses are bech32m (version ≥ 1) with a 32-byte witness program.
@@ -351,6 +377,31 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   } catch (tvlErr: any) {
     console.warn('[BTCStake] fetchUserPosition → getTVL sanity check FAILED:', tvlErr?.message ?? tvlErr);
     console.warn('[BTCStake] → contract may be unreachable or wrong address');
+  }
+
+  // ── HARDCODED TEST: verify contract returns data for the known sender address ─
+  // This confirms the RPC call works before we try the dynamic address derivation.
+  // The address below is SHA256(compressedPubKey) observed in the stake tx.
+  const KNOWN_SENDER_HEX = 'ecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb';
+  try {
+    const knownBytes = new Uint8Array(Buffer.from(KNOWN_SENDER_HEX, 'hex'));
+    const knownAddr  = makeAddress(knownBytes);
+    console.log('[BTCStake] HARDCODED TEST → querying with known sender 0x' + KNOWN_SENDER_HEX);
+    const hardcodedPos = await (async () => {
+      const c   = await getStakingContract();
+      const res = await (c as any).getUserPosition(knownAddr);
+      const p   = res?.properties;
+      console.log('[BTCStake] HARDCODED TEST → revert:', res?.revert ?? '(none)');
+      console.log('[BTCStake] HARDCODED TEST → properties:', {
+        stakedAmount:  p?.stakedAmount  != null ? p.stakedAmount.toString()  : 'undefined',
+        pendingReward: p?.pendingReward != null ? p.pendingReward.toString() : 'undefined',
+        stakeBlock:    p?.stakeBlock    != null ? p.stakeBlock.toString()    : 'undefined',
+      });
+      return p?.stakedAmount != null ? satsToBTC(p.stakedAmount.toString()) : null;
+    })();
+    console.log('[BTCStake] HARDCODED TEST → stakedBTC:', hardcodedPos?.toFixed(8) ?? '(no data)');
+  } catch (e: any) {
+    console.warn('[BTCStake] HARDCODED TEST → threw:', e?.message ?? e);
   }
 
   // ── Enumerate ALL addresses the wallet exposes ────────────────────────────
@@ -528,6 +579,30 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
       } catch (pkErr: any) {
         console.warn('[BTCStake] fetchUserPosition → publicKey decode failed:', pkErr?.message);
       }
+    }
+
+    // ── Attempt C: SHA256(compressedPubKey) — the CORRECT OP_NET sender derivation ──
+    // btc-runtime sets Blockchain.tx.sender = SHA256(compressed 33-byte pubkey).
+    // This is what getPublicKey() returns and what the stake tx stored on-chain.
+    if (publicKey) {
+      console.log('[BTCStake] fetchUserPosition → trying SHA256(compressedPubKey)...');
+      try {
+        const { address: sha256Addr, hex: sha256Hex } = await pubKeyToOpNetAddress(publicKey);
+        console.log('[BTCStake] fetchUserPosition → SHA256(pubkey) hex:', sha256Hex);
+        console.log('[BTCStake] fetchUserPosition → expected:           0xecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb');
+        console.log('[BTCStake] fetchUserPosition → match?', sha256Hex === '0xecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb');
+        const pos = await tryGetPosition(sha256Addr, 'SHA256(compressedPubKey)→Address');
+        if (pos && pos.stakedAmount.gt(0)) {
+          console.log('[BTCStake] fetchUserPosition → ✓ non-zero via SHA256(compressedPubKey):', pos.stakedAmount.toFixed(8));
+          return pos;
+        }
+        if (pos) lastZeroPos = pos;
+      } catch (sha256Err: any) {
+        console.warn('[BTCStake] fetchUserPosition → SHA256 attempt failed:', sha256Err?.message);
+      }
+    } else {
+      console.warn('[BTCStake] fetchUserPosition → no publicKey provided — cannot try SHA256 derivation');
+      console.warn('[BTCStake] → ensure useWallet passes publicKey to fetchUserPosition');
     }
 
     console.warn('[BTCStake] fetchUserPosition → all attempts returned 0 — staked amount not found');
