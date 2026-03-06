@@ -402,8 +402,8 @@ export function StakingPanel({
                       </p>
                       <p className="text-btc-muted text-xs mt-1.5 leading-relaxed">
                         Rewards accumulate every Bitcoin block (~10 min).
-                        This estimate uses 12% APY and will be available to
-                        claim once the on-chain reward rate is activated.
+                        This estimate uses 12% APY and will be claimable soon
+                        — rewards are now accruing every Bitcoin block.
                       </p>
                     </div>
                   </div>
