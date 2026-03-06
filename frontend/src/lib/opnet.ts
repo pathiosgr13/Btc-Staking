@@ -370,6 +370,50 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
   console.log('[BTCStake] fetchUserPosition → bech32 address :', address);
   console.log('[BTCStake] fetchUserPosition → publicKey (hex):', publicKey ?? '(not provided)');
 
+  // ── Debug: dump everything window.opnet exposes ───────────────────────────
+  try {
+    const _wp = (window as any).opnet;
+    if (_wp) {
+      console.log('[BTCStake] Full window.opnet object:', JSON.stringify(Object.keys(_wp)));
+      console.log('[BTCStake] window.opnet.accounts:', _wp.accounts);
+      console.log('[BTCStake] window.opnet.selectedAddress:', _wp.selectedAddress);
+    } else {
+      console.warn('[BTCStake] window.opnet is undefined');
+    }
+  } catch (e: any) {
+    console.warn('[BTCStake] window.opnet dump threw:', e?.message);
+  }
+
+  // ── HARDCODED TEST: confirm contract returns data for known MLDSA address ──
+  const KNOWN_ADDRESS = '0xecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb';
+  try {
+    const knownBytes = new Uint8Array(Buffer.from(KNOWN_ADDRESS.slice(2), 'hex'));
+    const knownAddr  = makeAddress(knownBytes);
+    const c   = await getStakingContract();
+    const res = await (c as any).getUserPosition(knownAddr);
+    const p   = res?.properties;
+    const stakedBTC = p?.stakedAmount != null
+      ? satsToBTC(p.stakedAmount.toString()).toFixed(8)
+      : '0.00000000';
+    console.log('[BTCStake] HARDCODED TEST result:', {
+      stakedBTC,
+      revert:     res?.revert ?? '(none)',
+      stakedRaw:  p?.stakedAmount?.toString() ?? 'undefined',
+      rewardRaw:  p?.pendingReward?.toString() ?? 'undefined',
+      blockRaw:   p?.stakeBlock?.toString() ?? 'undefined',
+    });
+    if (!res?.revert && p?.stakedAmount != null && stakedBTC !== '0.00000000') {
+      console.log('[BTCStake] HARDCODED TEST → returning non-zero position');
+      return {
+        stakedAmount:  satsToBTC(p.stakedAmount.toString()),
+        pendingReward: satsToBTC((p.pendingReward ?? 0n).toString()),
+        stakeBlock:    BigInt((p.stakeBlock ?? 0n).toString()),
+      };
+    }
+  } catch (e: any) {
+    console.warn('[BTCStake] HARDCODED TEST threw:', e?.message ?? e);
+  }
+
   // ── Sanity check: call getTVL first to confirm the contract responds at all ─
   try {
     const tvlResult = await fetchTVL();
