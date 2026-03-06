@@ -83,6 +83,12 @@ const CUSTOM_STAKING_ABI = [
     ],
   },
   {
+    name: 'setRewardRate',
+    type: BitcoinAbiTypes.Function as typeof BitcoinAbiTypes.Function,
+    inputs:  [{ name: 'newRate', type: ABIDataTypes.UINT256 }],
+    outputs: [],
+  },
+  {
     name:   'Staked',
     type:   BitcoinAbiTypes.Event as typeof BitcoinAbiTypes.Event,
     values: [
@@ -847,5 +853,18 @@ export async function txUnstake(address: string, amountBTC: string): Promise<str
 export async function txClaimRewards(address: string): Promise<string> {
   const c          = await getStakingContract(true);
   const callResult = await (c as any).claimRewards();
+  return sendTx(callResult, address);
+}
+
+/**
+ * setRewardRate — deployer-only.
+ * Activates on-chain reward accrual. The contract's rewardRate defaults to 0
+ * after deployment; calling this with rate=10 starts distributing 10 sats/block
+ * per BTC of totalStaked (≈ 12% APY when totalStaked ≈ 1 BTC).
+ * Any subsequent call with rate=0 is rejected by the contract.
+ */
+export async function txSetRewardRate(address: string, rateSats: bigint): Promise<string> {
+  const c          = await getStakingContract(true);
+  const callResult = await (c as any).setRewardRate(rateSats);
   return sendTx(callResult, address);
 }

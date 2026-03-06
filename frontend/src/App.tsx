@@ -21,6 +21,7 @@ import { Referral }           from './pages/Referral';
 import { useWallet }          from './hooks/useWallet';
 import { useStaking }         from './hooks/useStaking';
 import { useReferral }        from './hooks/useReferral';
+import { AdminPanel }         from './components/AdminPanel';
 
 export default function App() {
   const [page, setPage] = useState<AppPage>('stake');
@@ -247,6 +248,17 @@ export default function App() {
                   </div>
                 ))}
               </motion.div>
+
+              {/* ── Admin panel (deployer only, #admin URL) ───────────────── */}
+              {window.location.hash === '#admin' && (
+                <AdminPanel
+                  connected={wallet.status === 'connected'}
+                  setRewardRateState={staking.setRewardRateState}
+                  onSetRewardRate={staking.adminSetRewardRate}
+                  onResetSetRewardRate={() => staking.resetTx('setRewardRate')}
+                  onConnect={wallet.connect}
+                />
+              )}
 
               {/* Footer */}
               <footer className="mt-12 text-center text-btc-muted/40 text-xs pb-6">

@@ -16,6 +16,7 @@ import {
   txStake,
   txUnstake,
   txClaimRewards,
+  txSetRewardRate,
   UserPosition,
   CONTRACT_ADDR,
 } from '../lib/opnet';
@@ -59,9 +60,10 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
     error:           null,
   });
 
-  const [stakeState,   setStakeState]   = useState<TxState>({ status: 'idle', txId: null, error: null });
-  const [unstakeState, setUnstakeState] = useState<TxState>({ status: 'idle', txId: null, error: null });
-  const [claimState,   setClaimState]   = useState<TxState>({ status: 'idle', txId: null, error: null });
+  const [stakeState,         setStakeState]         = useState<TxState>({ status: 'idle', txId: null, error: null });
+  const [unstakeState,       setUnstakeState]       = useState<TxState>({ status: 'idle', txId: null, error: null });
+  const [claimState,         setClaimState]         = useState<TxState>({ status: 'idle', txId: null, error: null });
+  const [setRewardRateState, setSetRewardRateState] = useState<TxState>({ status: 'idle', txId: null, error: null });
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -190,11 +192,24 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
     }
   }, [walletProvider, refresh]);
 
-  const resetTx = useCallback((type: 'stake' | 'unstake' | 'claim') => {
+  const adminSetRewardRate = useCallback(async (rateSats: bigint) => {
+    setSetRewardRateState({ status: 'pending', txId: null, error: null });
+    try {
+      if (!CONTRACT_ADDR || !address) throw new Error('Wallet not connected or contract not configured');
+      const txId = await txSetRewardRate(address, rateSats);
+      setSetRewardRateState({ status: 'success', txId, error: null });
+      setTimeout(refresh, 3000);
+    } catch (err: any) {
+      setSetRewardRateState({ status: 'error', txId: null, error: err?.message ?? 'setRewardRate failed' });
+    }
+  }, [address, refresh]);
+
+  const resetTx = useCallback((type: 'stake' | 'unstake' | 'claim' | 'setRewardRate') => {
     const idle: TxState = { status: 'idle', txId: null, error: null };
-    if (type === 'stake')   setStakeState(idle);
-    if (type === 'unstake') setUnstakeState(idle);
-    if (type === 'claim')   setClaimState(idle);
+    if (type === 'stake')          setStakeState(idle);
+    if (type === 'unstake')        setUnstakeState(idle);
+    if (type === 'claim')          setClaimState(idle);
+    if (type === 'setRewardRate')  setSetRewardRateState(idle);
   }, []);
 
   return {
@@ -203,9 +218,11 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
     stakeState,
     unstakeState,
     claimState,
+    setRewardRateState,
     stake,
     unstake,
     claimRewards,
+    adminSetRewardRate,
     resetTx,
   };
 }
