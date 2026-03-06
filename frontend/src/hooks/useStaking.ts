@@ -11,6 +11,7 @@ import {
   fetchTVL,
   fetchAPY,
   fetchUserPosition,
+  fetchCurrentBlock,
   fetchBtcPrice,
   txStake,
   txUnstake,
@@ -81,23 +82,41 @@ export function useStaking(address: string | null, walletProvider: any, publicKe
     }
 
     try {
-      // Fetch TVL, APY, and BTC price together — if these fail the page is
-      // genuinely broken (no network / wrong RPC).
-      const [tvl, apyBps, btcPrice] = await Promise.all([
+      // Fetch TVL, APY, BTC price, and current block in parallel.
+      const [tvl, apyBps, btcPrice, currentBlock] = await Promise.all([
         fetchTVL(),
         fetchAPY(),
         fetchBtcPrice(),
+        fetchCurrentBlock(),
       ]);
 
       // Position fetch is isolated: fetchUserPosition catches all errors
       // internally and returns zeroPosition(), so this never throws.
-      // TVL / APY are therefore always displayed even if the user's position
-      // call fails (e.g. revert, wrong address encoding, RPC hiccup).
-      // Pass publicKey too — OP_NET stores positions by compressed pubkey
-      // (Blockchain.tx.sender), so the pubkey lookup is tried first.
-      const position = address
+      let position = address
         ? await fetchUserPosition(address, publicKey ?? undefined)
         : EMPTY_POSITION;
+
+      // Client-side reward estimation when the contract returns 0.
+      // The contract's rewardRate defaults to 0 on-chain until setRewardRate()
+      // is called by the deployer. Until then, estimate using the 12% APY
+      // formula: stakedAmount * 0.12 / 52560 * blocksElapsed.
+      if (
+        position.stakedAmount.gt(0) &&
+        position.pendingReward.lte(0) &&
+        position.stakeBlock > 0n &&
+        currentBlock > position.stakeBlock
+      ) {
+        const blocksElapsed = Number(currentBlock - position.stakeBlock);
+        // 12% APY per Bitcoin year (52 560 blocks): reward/block = stake * 0.12 / 52560
+        const estimated = position.stakedAmount.times(0.12).div(52560).times(blocksElapsed);
+        console.log(
+          '[BTCStake] useStaking → contract pendingReward=0; client-side estimate:',
+          estimated.toFixed(8), 'tBTC', '| blocksElapsed:', blocksElapsed,
+          '| stakeBlock:', position.stakeBlock.toString(),
+          '| currentBlock:', currentBlock.toString(),
+        );
+        position = { ...position, pendingReward: estimated };
+      }
 
       setData({ tvl, apyBps, btcPrice, position, isLoading: false, error: null });
     } catch (err: any) {

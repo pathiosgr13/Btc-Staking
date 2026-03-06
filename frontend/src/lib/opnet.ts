@@ -793,6 +793,16 @@ function zeroPosition(): UserPosition {
   return { stakedAmount: new BigNumber(0), pendingReward: new BigNumber(0), stakeBlock: 0n };
 }
 
+export async function fetchCurrentBlock(): Promise<bigint> {
+  try {
+    const provider = await getReadProvider();
+    return await (provider as any).getBlockNumber();
+  } catch (e: any) {
+    console.warn('[BTCStake] fetchCurrentBlock failed:', e?.message ?? e);
+    return 0n;
+  }
+}
+
 export async function fetchBtcPrice(): Promise<number> {
   try {
     const res  = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
