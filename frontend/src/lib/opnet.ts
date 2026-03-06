@@ -165,8 +165,8 @@ export async function fetchBalance(address: string, walletProvider?: any): Promi
       // OP_WALLET and UniSat both return { confirmed, unconfirmed, total } in sats
       if (raw != null && typeof raw === 'object') {
         console.log('[BTCStake] fetchBalance → object keys:', Object.keys(raw));
-        // Prefer 'confirmed', fall back to 'total'
-        const amount = raw.confirmed ?? raw.total ?? raw.balance ?? raw.amount;
+        // Prefer 'total' — matches what OP_WALLET displays (confirmed + unconfirmed)
+        const amount = raw.total ?? raw.confirmed ?? raw.balance ?? raw.amount;
         if (amount !== undefined && amount !== null) {
           const sats = BigInt(Math.round(Number(amount)));
           console.log('[BTCStake] fetchBalance → sats from object:', sats.toString(), '(field used:', raw.confirmed !== undefined ? 'confirmed' : raw.total !== undefined ? 'total' : 'other', ')');
@@ -379,31 +379,6 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
     console.warn('[BTCStake] → contract may be unreachable or wrong address');
   }
 
-  // ── HARDCODED TEST: verify contract returns data for the known sender address ─
-  // This confirms the RPC call works before we try the dynamic address derivation.
-  // The address below is SHA256(compressedPubKey) observed in the stake tx.
-  const KNOWN_SENDER_HEX = 'ecd84dec1bc977090d8481e2e7fef2285584b43494edb78d2d76c0baa42e1abb';
-  try {
-    const knownBytes = new Uint8Array(Buffer.from(KNOWN_SENDER_HEX, 'hex'));
-    const knownAddr  = makeAddress(knownBytes);
-    console.log('[BTCStake] HARDCODED TEST → querying with known sender 0x' + KNOWN_SENDER_HEX);
-    const hardcodedPos = await (async () => {
-      const c   = await getStakingContract();
-      const res = await (c as any).getUserPosition(knownAddr);
-      const p   = res?.properties;
-      console.log('[BTCStake] HARDCODED TEST → revert:', res?.revert ?? '(none)');
-      console.log('[BTCStake] HARDCODED TEST → properties:', {
-        stakedAmount:  p?.stakedAmount  != null ? p.stakedAmount.toString()  : 'undefined',
-        pendingReward: p?.pendingReward != null ? p.pendingReward.toString() : 'undefined',
-        stakeBlock:    p?.stakeBlock    != null ? p.stakeBlock.toString()    : 'undefined',
-      });
-      return p?.stakedAmount != null ? satsToBTC(p.stakedAmount.toString()) : null;
-    })();
-    console.log('[BTCStake] HARDCODED TEST → stakedBTC:', hardcodedPos?.toFixed(8) ?? '(no data)');
-  } catch (e: any) {
-    console.warn('[BTCStake] HARDCODED TEST → threw:', e?.message ?? e);
-  }
-
   // ── Enumerate ALL addresses the wallet exposes ────────────────────────────
   // Collect every address format so we can try each as the getUserPosition key.
   const candidateMap = new Map<string, string>(); // label → address string
@@ -542,6 +517,54 @@ export async function fetchUserPosition(address: string, publicKey?: string): Pr
 
   try {
     let lastZeroPos: UserPosition | null = null;
+
+    // ── Attempt MLDSA: highest priority — use 0x-format MLDSA address directly ──
+    // OP_WALLET exposes BOTH the BTC taproot address (opt1pp...) AND the MLDSA
+    // address (0x + 64 hex chars) in window.opnet.accounts / selectedAddress.
+    // The contract stores positions keyed by the MLDSA address, so we must use
+    // it directly — no hashing or bech32 decoding needed.
+    try {
+      const wp = (typeof window !== 'undefined')
+        ? (window as any).opnet ?? (window as any).unisat ?? null
+        : null;
+      const mldsaCandidates: string[] = [];
+      if (wp) {
+        const accs = wp.accounts;
+        if (Array.isArray(accs)) {
+          accs.forEach((a: string) => {
+            if (typeof a === 'string' && /^0x[0-9a-fA-F]{64}$/.test(a))
+              mldsaCandidates.push(a);
+          });
+        }
+        const sel = wp.selectedAddress;
+        if (typeof sel === 'string' && /^0x[0-9a-fA-F]{64}$/.test(sel) && !mldsaCandidates.includes(sel))
+          mldsaCandidates.push(sel);
+        // Scan all enumerable properties for any 0x-format 32-byte value
+        for (const key of Object.keys(wp)) {
+          const v = wp[key];
+          if (typeof v === 'string' && /^0x[0-9a-fA-F]{64}$/.test(v) && !mldsaCandidates.includes(v)) {
+            console.log(`[BTCStake] fetchUserPosition → found 0x address in window.opnet.${key}:`, v);
+            mldsaCandidates.push(v);
+          }
+        }
+      }
+      console.log('[BTCStake] fetchUserPosition → MLDSA candidates:', mldsaCandidates);
+      for (const mldsaHex of mldsaCandidates) {
+        const bytes = new Uint8Array(Buffer.from(mldsaHex.slice(2), 'hex'));
+        const pos = await tryGetPosition(makeAddress(bytes), `MLDSA(${mldsaHex.slice(0, 10)}...)`);
+        if (pos !== null) {
+          // MLDSA address is authoritative — return even if stake is zero
+          console.log('[BTCStake] fetchUserPosition → ✓ MLDSA address confirmed:', mldsaHex, '| staked:', pos.stakedAmount.toFixed(8));
+          return pos;
+        }
+      }
+      if (mldsaCandidates.length === 0) {
+        console.warn('[BTCStake] fetchUserPosition → no MLDSA address found in window.opnet');
+        console.warn('[BTCStake] → OP_WALLET must expose the 0x address in .accounts or .selectedAddress');
+      }
+    } catch (mldsaErr: any) {
+      console.warn('[BTCStake] fetchUserPosition → MLDSA detection threw:', mldsaErr?.message ?? mldsaErr);
+    }
 
     // ── Attempt A: try every wallet-exposed address decoded to Address object ──
     for (const [label, addrStr] of candidateMap) {
